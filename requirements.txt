@@ -1,0 +1,11 @@
+unstructured[pdf]
+unstructured-client
+python-dotenv
+pytesseract
+pdf2image
+pillow
+opencv-python
+requests
+langchain
+chromadb
+tiktoken
