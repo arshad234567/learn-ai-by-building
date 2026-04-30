@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Fine-Tuning Large Language Models: A Practical Guide</title>
+  <meta name="description" content="A deep dive into fine-tuning LLMs with LoRA, QLoRA, and Unsloth for efficient training on consumer hardware."/>
+  <meta name="author" content="Alex Rivera"/>
+  <meta property="og:title" content="Fine-Tuning Large Language Models: A Practical Guide"/>
+  <meta property="og:type" content="article"/>
+  <meta property="article:published_time" content="2024-11-15T09:00:00Z"/>
+  <meta property="article:tag" content="Machine Learning"/>
+  <meta property="article:tag" content="LLM"/>
+  <meta property="article:tag" content="Python"/>
+</head>
+<body>
+
+  <header>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/topics">Topics</a>
+      <a href="/write">Write</a>
+    </nav>
+  </header>
+
+  <main>
+    <article>
+
+      <section class="article-meta">
+        <span class="publication">Towards Data Science</span>
+        <h1>Fine-Tuning Large Language Models: A Practical Guide</h1>
+        <h2>How to adapt a 7B or 8B parameter model to your domain using LoRA and Unsloth — without needing a data centre</h2>
+
+        <div class="author-info">
+          <span class="author-name">Alex Rivera</span>
+          <time datetime="2024-11-15">Nov 15, 2024</time>
+          <span class="read-time">12 min read</span>
+        </div>
+
+        <ul class="tags">
+          <li>Machine Learning</li>
+          <li>LLM</li>
+          <li>Python</li>
+          <li>Deep Learning</li>
+          <li>NLP</li>
+        </ul>
+      </section>
+
+      <section class="article-body">
+
+        <p>
+          Large language models have transformed what software can do. But out-of-the-box, a general-purpose model often falls short when you need consistent tone, domain-specific vocabulary, or structured output formats. Fine-tuning bridges that gap — and in 2024 it has never been more accessible.
+        </p>
+
+        <p>
+          In this article I'll walk through a complete fine-tuning pipeline using <strong>Unsloth</strong>, <strong>Hugging Face TRL</strong>, and the <strong>Alpaca</strong> dataset. By the end you'll have a LoRA-adapted Llama 3 8B model running on a single consumer GPU.
+        </p>
+
+        <h2>Why Fine-Tune at All?</h2>
+
+        <p>
+          Prompt engineering solves a lot of problems cheaply. Before committing to a fine-tuning run, ask yourself whether a well-crafted system prompt or few-shot examples already get you where you need to go. Fine-tuning earns its cost when:
+        </p>
+
+        <ul>
+          <li>You need the model to reliably output a very specific format (JSON, XML, custom schema).</li>
+          <li>Your domain has terminology the base model consistently misuses or hallucinates.</li>
+          <li>You are running thousands of inferences daily and want to reduce prompt length (and therefore cost).</li>
+          <li>You need to embed proprietary knowledge that cannot be sent to a third-party API.</li>
+        </ul>
+
+        <h2>Understanding LoRA</h2>
+
+        <p>
+          Full fine-tuning updates every parameter in the model — all 8 billion of them for Llama 3 8B. At fp16 that is 16 GB just to store the weights, and you need roughly 3× that for gradients and optimiser state. Most practitioners do not have that hardware.
+        </p>
+
+        <p>
+          Low-Rank Adaptation (LoRA), introduced by Hu et al. in 2021, sidesteps this by freezing the original weights and injecting small trainable matrices into each attention layer. If the original weight matrix is <em>W ∈ ℝ^(d×k)</em>, LoRA adds <em>ΔW = BA</em> where <em>B ∈ ℝ^(d×r)</em> and <em>A ∈ ℝ^(r×k)</em> with rank <em>r ≪ min(d, k)</em>. Typically r=8 or r=16.
+        </p>
+
+        <blockquote>
+          <p>"The key insight is that the weight updates during fine-tuning have a low intrinsic rank, even though the weight matrices themselves are full rank."</p>
+          <cite>— Hu et al., LoRA: Low-Rank Adaptation of Large Language Models (2021)</cite>
+        </blockquote>
+
+        <p>
+          QLoRA extends this by loading the base model in 4-bit NormalFloat (NF4) quantisation, cutting VRAM requirements by a further 75%. This is what makes fine-tuning a 7B or 8B model feasible on a single 12 GB consumer GPU.
+        </p>
+
+        <h2>Setting Up the Environment</h2>
+
+        <p>First, install the required packages. Unsloth handles the Triton/CUDA kernels that make LoRA training 2× faster than vanilla PEFT:</p>
+
+        <pre><code>pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+pip install --no-deps trl peft accelerate bitsandbytes</code></pre>
+
+        <p>Verify that your GPU is detected and that bfloat16 is supported:</p>
+
+        <pre><code>import torch
+print(torch.cuda.get_device_name(0))
+print("bfloat16 supported:", torch.cuda.is_bf16_supported())</code></pre>
+
+        <h2>Loading the Base Model</h2>
+
+        <p>
+          Unsloth provides patched versions of popular architectures. Loading a 4-bit model takes roughly 10 seconds on a modern GPU:
+        </p>
+
+        <pre><code>from unsloth import FastLanguageModel
+
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="unsloth/llama-3-8b-bnb-4bit",
+    max_seq_length=2048,
+    dtype=None,          # auto-detect
+    load_in_4bit=True,
+)</code></pre>
+
+        <p>
+          The <code>dtype=None</code> argument lets Unsloth choose between float16 and bfloat16 based on GPU capability. Ampere and later (RTX 30xx, A100) support bfloat16, which is more numerically stable for training.
+        </p>
+
+        <h2>Attaching LoRA Adapters</h2>
+
+        <p>
+          The <code>get_peft_model</code> call freezes the base weights and injects trainable adapter matrices. The target modules listed below are the attention and feed-forward projections — the layers that matter most for task adaptation:
+        </p>
+
+        <pre><code>model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,
+    target_modules=[
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    ],
+    lora_alpha=32,
+    lora_dropout=0.0,
+    bias="none",
+    use_gradient_checkpointing="unsloth",
+)</code></pre>
+
+        <p>
+          Setting <code>lora_dropout=0.0</code> is recommended by the Unsloth authors — for most fine-tuning workloads dropout in LoRA layers hurts convergence more than it helps generalisation. Gradient checkpointing with the Unsloth backend reduces VRAM by ~30% at the cost of a small recomputation overhead.
+        </p>
+
+        <h2>Preparing the Dataset</h2>
+
+        <p>
+          We'll use the cleaned Alpaca dataset from <code>yahma/alpaca-cleaned</code>. The dataset contains around 52,000 instruction-following pairs in the schema <code>{instruction, input, output}</code>. We convert each row to a single formatted string:
+        </p>
+
+        <pre><code>ALPACA_PROMPT = """Below is an instruction that describes a task.
+Write a response that appropriately completes the request.
+
+### Instruction:
+{instruction}
+
+### Input:
+{input}
+
+### Response:
+{output}"""
+
+def format_alpaca(examples):
+    texts = []
+    for inst, inp, out in zip(
+        examples["instruction"],
+        examples["input"],
+        examples["output"]
+    ):
+        texts.append(ALPACA_PROMPT.format(
+            instruction=inst, input=inp, output=out
+        ) + tokenizer.eos_token)
+    return {"text": texts}
+
+from datasets import load_dataset
+dataset = load_dataset("yahma/alpaca-cleaned", split="train")
+dataset = dataset.map(format_alpaca, batched=True)</code></pre>
+
+        <h2>Training</h2>
+
+        <p>
+          SFTTrainer from TRL handles the supervised fine-tuning loop. Key hyperparameters:
+        </p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Parameter</th>
+              <th>Value</th>
+              <th>Rationale</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>learning_rate</td>
+              <td>2e-4</td>
+              <td>Standard starting point for LoRA on instruction data</td>
+            </tr>
+            <tr>
+              <td>lr_scheduler_type</td>
+              <td>cosine</td>
+              <td>Smooth decay avoids loss spikes at end of training</td>
+            </tr>
+            <tr>
+              <td>optim</td>
+              <td>adamw_8bit</td>
+              <td>8-bit Adam cuts optimiser state memory by 75%</td>
+            </tr>
+            <tr>
+              <td>per_device_train_batch_size</td>
+              <td>2</td>
+              <td>Safe default for 12 GB VRAM with seq_len=2048</td>
+            </tr>
+            <tr>
+              <td>gradient_accumulation_steps</td>
+              <td>4</td>
+              <td>Effective batch size of 8 without extra VRAM</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2>Saving and Exporting</h2>
+
+        <p>
+          After training, save the LoRA adapters. These are small — typically 50–200 MB depending on rank — and can be shared or version-controlled independently of the base model:
+        </p>
+
+        <pre><code>model.save_pretrained("./my-llama3-adapter")
+tokenizer.save_pretrained("./my-llama3-adapter")</code></pre>
+
+        <p>To merge the adapters into the base weights and export as a standalone 16-bit model:</p>
+
+        <pre><code>model.save_pretrained_merged(
+    "./my-llama3-merged",
+    tokenizer,
+    save_method="merged_16bit"
+)</code></pre>
+
+        <p>For local inference with llama.cpp or Ollama, export to GGUF:</p>
+
+        <pre><code>model.save_pretrained_gguf(
+    "./my-llama3-gguf",
+    tokenizer,
+    quantization_method="q4_k_m"
+)</code></pre>
+
+        <h2>Results and Next Steps</h2>
+
+        <p>
+          After 60 steps (about 4 minutes on an RTX 3090) the training loss drops from ~2.1 to ~1.4 and the model responds noticeably more consistently to instruction-style prompts. A full epoch of Alpaca typically brings loss to ~0.9.
+        </p>
+
+        <p>
+          From here, the natural next steps are:
+        </p>
+
+        <ol>
+          <li>Swap the dataset for your own domain-specific corpus.</li>
+          <li>Experiment with rank (r=32 or r=64) for tasks requiring more capacity.</li>
+          <li>Evaluate with a held-out test set using MT-Bench or domain-specific metrics.</li>
+          <li>Serve the merged model with vLLM or Ollama behind a simple API.</li>
+        </ol>
+
+        <p>
+          Fine-tuning has moved from research infrastructure to a weekend project. The combination of 4-bit quantisation, LoRA, and optimised training kernels means that meaningful model adaptation is now within reach for any practitioner with a single modern GPU.
+        </p>
+
+      </section>
+
+      <footer class="article-footer">
+        <p>
+          <strong>Alex Rivera</strong> is a machine learning engineer and technical writer.
+          Follow for more articles on LLMs, MLOps, and applied AI.
+        </p>
+        <ul class="related-tags">
+          <li>Machine Learning</li>
+          <li>Artificial Intelligence</li>
+          <li>Python</li>
+          <li>Data Science</li>
+        </ul>
+      </footer>
+
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <p>© 2024 Towards Data Science. A Medium publication.</p>
+  </footer>
+
+</body>
+</html>
