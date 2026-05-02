@@ -9,3 +9,10 @@ requests
 langchain
 chromadb
 tiktoken
+matplotlib
+numpy
+scikit-learn
+torch
+transformers
+gensim
+sentence-transformers
