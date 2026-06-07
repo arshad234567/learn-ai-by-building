@@ -96,8 +96,4 @@ An eight percent increase in perplexity at INT4 precision is generally acceptabl
 
 Inference engines like vLLM load quantized models directly, requiring no post-processing or format conversion after the compression step.
 
----
 
-## License
-
-MIT License.
