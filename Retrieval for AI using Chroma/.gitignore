@@ -5,3 +5,16 @@ trained_mlm/
 mlm_model/
 .ipynb_checkpoints/
 __pycache__/
+
+
+.idea/
+.env
+**/.env
+
+
+*.pyc
+*.pth
+*.pt
+*.bin
+*.safetensors
+chroma_tmp/
