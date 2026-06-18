@@ -1,0 +1,7 @@
+.venv/
+chromadbvenv/
+models/
+trained_mlm/
+mlm_model/
+.ipynb_checkpoints/
+__pycache__/
