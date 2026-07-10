@@ -6,3 +6,7 @@ models/
 mlm_model/
 trained_mlm/
 *.pyc
+/Guardrails/.ipynb_checkpoints/
+/Embeddings/.ipynb_checkpoints/
+/Embeddings/mlm_model/
+/Guardrails/.env
