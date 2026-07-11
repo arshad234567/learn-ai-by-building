@@ -186,7 +186,7 @@ class ChatWidget:
         else:
             settings.use_server = True
             response = Guard(name=self._guard_name)(
-                model="gpt-3.5-turbo",
+                model="openai/gpt-oss-20b",
                 messages=message_history,
             )
 
