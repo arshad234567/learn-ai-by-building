@@ -7,17 +7,16 @@ from dotenv import find_dotenv, load_dotenv
 from guardrails import Guard, settings
 from IPython.display import display
 from sentence_transformers import SentenceTransformer
-
+from groq import Groq
 
 
 def load_env():
     _ = load_dotenv(find_dotenv())
 
 
-def get_openai_api_key():
+def get_groq_api_key():
     load_env()
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    return openai_api_key
+    return os.getenv("GROQ_API_KEY")
 
 
 def get_guardrails_api_key():
