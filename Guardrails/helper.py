@@ -176,7 +176,7 @@ class ChatWidget:
     def bot_response_generator(self, message_history):
         if self.client:
             response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model="openai/gpt-oss-20b",
                 messages=message_history,
                 seed=42,
                 temperature=0.0,
